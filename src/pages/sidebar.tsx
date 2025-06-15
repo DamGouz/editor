@@ -182,7 +182,20 @@ export const DirectorySidebar:React.FC<{width?:number; onSelect?:(p:string)=>voi
             <Option key={id} value={id}>{id===latest?`HEAD (${id})`:`rev ${id}`}</Option>
           ))}
         </Select>
-        <Button icon={<SyncOutlined/>} size="small" onClick={fetchRevs}/>
+        <Button
+          icon={<SyncOutlined />}
+          size="small"
+          onClick={async () => {
+            /* 1️⃣  Refresh the revisions list */
+            await fetchRevs();
+
+            /* 2️⃣  Re-scan the file tree for the current revision */
+            const id = revId ?? latest;           // revId might still be undefined
+            if (id !== undefined) {
+              await fetchTree(id);
+            }
+          }}
+        />
         <Popconfirm title="Create new revision?" onConfirm={snapshot}>
           <Button icon={<PlusOutlined/>} size="small" loading={pending}/>
         </Popconfirm>

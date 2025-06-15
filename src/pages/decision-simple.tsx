@@ -25,8 +25,8 @@ enum ContentType { Decision = 'application/vnd.gorules.decision' }
 /* ---------- tab model ---------- */
 interface TabData {
   key: string;
-  title: string;
-  filePath?: string;
+  title: string;                // short file name (e.g. a.json)
+  filePath?: string;            // full path if from sidebar
   graph: DecisionGraphType;
   trace?: Simulation;
   dirty?: boolean;
@@ -45,7 +45,7 @@ export const DecisionSimplePage: React.FC = () => {
   const filePath   = activeTab?.filePath;
   const fileTitle  = activeTab?.title ?? '';
 
-  /* helpers ------------------------------------------------------- */
+  /* ---------------- helpers ---------------- */
   const updateActive = (patch: Partial<TabData>) =>
     setTabs(prev => prev.map(t => (t.key === activeKey ? { ...t, ...patch } : t)));
 
@@ -53,7 +53,7 @@ export const DecisionSimplePage: React.FC = () => {
 
   const closeTab = (k: string) => setTabs(prev => prev.filter(t => t.key !== k));
 
-  /* sidebar file open -------------------------------------------- */
+  /* ----- sidebar click → new tab/focus ---- */
   const handleFileSelect = async (path: string) => {
     const existing = tabs.find(t => t.filePath === path);
     if (existing) { setActive(existing.key); return; }
@@ -73,7 +73,7 @@ export const DecisionSimplePage: React.FC = () => {
     } catch (e) { displayError(e); }
   };
 
-  /* save ---------------------------------------------------------- */
+  /* -------------- save helpers ------------ */
   const ensureAcyclic = (dc: DecisionGraphType = graph) => {
     const g = new DirectedGraph();
     (dc.edges || []).forEach(e => g.mergeEdge(e.sourceId, e.targetId));
@@ -94,12 +94,14 @@ export const DecisionSimplePage: React.FC = () => {
     } catch (e) { displayError(e); }
   };
 
-  /* ui helpers ---------------------------------------------------- */
+  /* ---------- JSX helpers ----------------- */
+  /* Tab label: just file name (+* if dirty) */
   const tabLabel = (t: TabData) => (t.dirty ? `${t.title} *` : t.title);
 
+  /* Header title: full path (or title) + Save icon */
   const headerTitle = (t: TabData) => (
     <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-      {t.dirty ? `${t.title} *` : t.title}
+      {(t.filePath ?? t.title) + (t.dirty ? ' *' : '')}
       <Tooltip title="Save">
         <Button
           type="text"
@@ -110,7 +112,7 @@ export const DecisionSimplePage: React.FC = () => {
     </span>
   );
 
-  /* -------------------------------------------------------------- */
+  /* ------------------- JSX ---------------- */
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <DirectorySidebar onSelect={handleFileSelect} />
@@ -183,13 +185,19 @@ export const DecisionSimplePage: React.FC = () => {
                           renderPanel: () => (
                             <GraphSimulator
                               onClear={() => updateActive({ trace: undefined })}
-                              onRun={async ({ graph, context }) => {
+                              onRun={async ({ context }) => {
+                                   /* derive root_dir and filepath from the tab’s filePath (e.g. "4/a/b.json") */
+                                   const full = t.filePath ?? '';             // "" if the tab is untitled
+                                   const [rev, ...rest] = full.split('/');    // rev = "4", rest = ["a","b.json"]
+                                   const rootDir = `decisions/${rev}`;       // => "decisions/4"
+                                   const filepath = rest.join('/');           // => "a/b.json"
                                 try {
-                                  const { data } = await axios.post('/api/simulate', { content: graph, context });
+                                  const { data } = await axios.post('/api/simulate', { rootDir, filepath, context });
                                   updateActive({ trace: { result: data } });
                                 } catch (e) { displayError(e); }
                               }}
-                              // @ts-ignore  (adjust to the actual callback name your library provides)
+                              // adjust to your library's actual callback name
+                              // @ts-ignore
                               onContextChange={() => updateActive({ dirty: true })}
                             />
                           ),

@@ -22,14 +22,6 @@ export default defineConfig({
     // },
     
     proxy: {
-      '/api/fs': {
-        target: 'http://localhost:4000',
-        changeOrigin: true,
-      },
-      '/api/revisions': {
-        target: 'http://localhost:4000',
-        changeOrigin: true,
-      },
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
