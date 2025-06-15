@@ -156,6 +156,15 @@ def fs_snapshot():
             shutil.copy2(src_item, dst_item)
     return jsonify({"id": new_rev})
 
+# --- file-service ---
+@app.route("/api/fs/mkdir", methods=["POST"])
+def fs_mkdir():
+    req = request.get_json()
+    target = safe_path(req["path"])   # e.g. 3/src/utils
+    os.makedirs(target, exist_ok=True)
+    return "", 201
+
+
 # --- revision-control ---
 
 @app.route("/api/revisions", methods=["GET"])

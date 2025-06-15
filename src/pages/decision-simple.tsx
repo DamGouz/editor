@@ -1,444 +1,212 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Layout, Button, Divider, Dropdown, message, Modal, theme, Typography } from 'antd';
-import { BulbOutlined, CheckOutlined, PlayCircleOutlined } from '@ant-design/icons';
-import { decisionTemplates } from '../assets/decision-templates';
-import { displayError } from '../helpers/error-message.ts';
-import { DecisionContent, DecisionEdge, DecisionNode } from '../helpers/graph.ts';
-import { useSearchParams } from 'react-router-dom';
-import { DecisionGraph, DecisionGraphRef, DecisionGraphType, GraphSimulator, Simulation } from '@gorules/jdm-editor';
-import { PageHeader } from '../components/page-header.tsx';
+import React, { useRef, useState } from 'react';
+import {
+  Layout, Tabs, Button, Space, Dropdown, Modal, message, theme, Tooltip,
+} from 'antd';
+import {
+  BulbOutlined, CheckOutlined, PlayCircleOutlined, SaveOutlined,
+} from '@ant-design/icons';
+
+import {
+  DecisionGraph, DecisionGraphRef, GraphSimulator, Simulation,
+} from '@gorules/jdm-editor';
 import { DirectedGraph } from 'graphology';
 import { hasCycle } from 'graphology-dag';
-import { Stack } from '../components/stack.tsx';
-import { match, P } from 'ts-pattern';
-
-import { DirectorySidebar } from './sidebar.tsx';
-
-import classes from './decision-simple.module.css';
 import axios from 'axios';
-import { ThemePreference, useTheme } from '../context/theme.provider.tsx';
 
-enum DocumentFileTypes {
-  Decision = 'application/vnd.gorules.decision',
+import { PageHeader } from '../components/page-header';
+import { DirectorySidebar } from './sidebar';
+import { displayError } from '../helpers/error-message';
+import classes from './decision-simple.module.css';
+import { DecisionGraphType } from '@gorules/jdm-editor';
+import { ThemePreference, useTheme } from '../context/theme.provider';
+
+enum ContentType { Decision = 'application/vnd.gorules.decision' }
+
+/* ---------- tab model ---------- */
+interface TabData {
+  key: string;
+  title: string;
+  filePath?: string;
+  graph: DecisionGraphType;
+  trace?: Simulation;
+  dirty?: boolean;
 }
-
-const supportFSApi = Object.hasOwn(window, 'showSaveFilePicker');
 
 export const DecisionSimplePage: React.FC = () => {
   const { token } = theme.useToken();
-  const fileInput = useRef<HTMLInputElement>(null);
-  const graphRef = React.useRef<DecisionGraphRef>(null);
   const { themePreference, setThemePreference } = useTheme();
+  const graphRef = useRef<DecisionGraphRef>(null);
 
-  const [searchParams] = useSearchParams();
-  const [fileHandle, setFileHandle] = useState<FileSystemFileHandle>();
-  const [graph, setGraph] = useState<DecisionGraphType>({ nodes: [], edges: [] });
-  const [fileName, setFileName] = useState('Untitled Decision');
-  const [graphTrace, setGraphTrace] = useState<Simulation>();
+  const [tabs, setTabs]   = useState<TabData[]>([]);
+  const [activeKey, setActive] = useState<string>();
 
-  useEffect(() => {
-    const templateParam = searchParams.get('template');
-    if (templateParam) {
-      loadTemplateGraph(templateParam);
-    }
-  }, []);
+  const activeTab  = tabs.find(t => t.key === activeKey);
+  const graph      = activeTab?.graph ?? { nodes: [], edges: [] };
+  const filePath   = activeTab?.filePath;
+  const fileTitle  = activeTab?.title ?? '';
 
-  const loadTemplateGraph = (template: string) => {
-    const templateGraph = match(template)
-      .with(P.string, (template) => decisionTemplates?.[template])
-      .otherwise(() => undefined);
+  /* helpers ------------------------------------------------------- */
+  const updateActive = (patch: Partial<TabData>) =>
+    setTabs(prev => prev.map(t => (t.key === activeKey ? { ...t, ...patch } : t)));
 
-    if (templateGraph) {
-      setGraph(templateGraph);
-    }
-  };
+  const addTab = (tab: TabData) => { setTabs(p => [...p, tab]); setActive(tab.key); };
 
-  const openFile = async () => {
-    if (!supportFSApi) {
-      fileInput.current?.click?.();
-      return;
-    }
+  const closeTab = (k: string) => setTabs(prev => prev.filter(t => t.key !== k));
+
+  /* sidebar file open -------------------------------------------- */
+  const handleFileSelect = async (path: string) => {
+    const existing = tabs.find(t => t.filePath === path);
+    if (existing) { setActive(existing.key); return; }
 
     try {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{ accept: { 'application/json': ['.json'] } }],
-      });
+      const { data } = await axios.get(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      const parsed = JSON.parse(data);
+      if (parsed.contentType !== ContentType.Decision) throw new Error('Invalid type');
 
-      setFileHandle(handle);
-
-      const file = await handle.getFile();
-      const content = await file.text();
-      setFileName(file?.name);
-      const parsed = JSON.parse(content);
-      setGraph({
-        nodes: parsed?.nodes || [],
-        edges: parsed?.edges || [],
+      addTab({
+        key: crypto.randomUUID(),
+        title: path.split('/').pop() || 'decision',
+        filePath: path,
+        graph: { nodes: parsed.nodes || [], edges: parsed.edges || [] },
+        dirty: false,
       });
-    } catch (err) {
-      displayError(err);
-    }
+    } catch (e) { displayError(e); }
   };
 
-  const saveFileAs = async () => {
-    if (!supportFSApi) {
-      return await handleDownload();
-    }
-
-    let writable: FileSystemWritableFileStream | undefined = undefined;
-    try {
-      checkCyclic();
-      const json = JSON.stringify({ contentType: DocumentFileTypes.Decision, ...graph }, null, 2);
-      const newFileName = `${fileName.replaceAll('.json', '')}.json`;
-      const handle = await window.showSaveFilePicker({
-        types: [{ description: newFileName, accept: { 'application/json': ['.json'] } }],
-      });
-
-      writable = await handle.createWritable();
-      await writable.write(json);
-      setFileHandle(handle);
-      const file = await handle.getFile();
-      setFileName(file.name);
-      message.success('File saved');
-    } catch (e) {
-      displayError(e);
-    } finally {
-      writable?.close?.();
-    }
+  /* save ---------------------------------------------------------- */
+  const ensureAcyclic = (dc: DecisionGraphType = graph) => {
+    const g = new DirectedGraph();
+    (dc.edges || []).forEach(e => g.mergeEdge(e.sourceId, e.targetId));
+    if (hasCycle(g)) throw new Error('Circular dependencies detected');
   };
 
-  const saveFile = async () => {
+  const saveToServer = async () => {
+    if (!activeTab) return;
     try {
-      checkCyclic();
-      const json = JSON.stringify({ contentType: DocumentFileTypes.Decision, ...graph }, null, 2);
+      ensureAcyclic();
+      const json = JSON.stringify({ contentType: ContentType.Decision, ...graph }, null, 2);
       await axios.post('/api/fs/write', {
-        path: fileName,
+        path: (filePath ?? fileTitle) || 'decision.json',
         content: json,
       });
+      updateActive({ dirty: false });
       message.success('File saved');
-    } catch (e) {
-      displayError(e);
-    }
+    } catch (e) { displayError(e); }
   };
 
-  const handleNew = async () => {
-    Modal.confirm({
-      title: 'New decision',
-      icon: false,
-      content: <div>Are you sure you want to create new blank decision, your current work might be lost?</div>,
-      onOk: async () => {
-        setGraph({
-          nodes: [],
-          edges: [],
-        });
-      },
-    });
-  };
+  /* ui helpers ---------------------------------------------------- */
+  const tabLabel = (t: TabData) => (t.dirty ? `${t.title} *` : t.title);
 
-  const handleOpenMenu = async (e: { key: string }) => {
-    switch (e.key) {
-      case 'file-system':
-        openFile();
-        break;
-      default: {
-        if (Object.hasOwn(decisionTemplates, e.key)) {
-          Modal.confirm({
-            title: 'Open example',
-            icon: false,
-            content: <div>Are you sure you want to open example decision, your current work might be lost?</div>,
-            onOk: async () => loadTemplateGraph(e.key),
-          });
-        }
-        break;
-      }
-    }
-  };
-
-  const checkCyclic = (dc: DecisionContent | undefined = undefined) => {
-    const decisionContent = match(dc)
-      .with(P.nullish, () => graph)
-      .otherwise((data) => data);
-
-    const diGraph = new DirectedGraph();
-    (decisionContent?.edges || []).forEach((edge) => {
-      diGraph.mergeEdge(edge.sourceId, edge.targetId);
-    });
-
-    if (hasCycle(diGraph)) {
-      throw new Error('Circular dependencies detected');
-    }
-  };
-
-  const handleDownload = async () => {
-    try {
-      checkCyclic();
-      // create file in browser
-      const newFileName = `${fileName.replaceAll('.json', '')}.json`;
-      const json = JSON.stringify({ contentType: DocumentFileTypes.Decision, ...graph }, null, 2);
-      const blob = new Blob([json], { type: 'application/json' });
-      const href = URL.createObjectURL(blob);
-
-      // create "a" HTLM element with href to file
-      const link = window.document.createElement('a');
-      link.href = href;
-      link.download = newFileName;
-      window.document.body.appendChild(link);
-      link.click();
-
-      // clean up "a" element & remove ObjectURL
-      window.document.body.removeChild(link);
-      URL.revokeObjectURL(href);
-    } catch (e) {
-      displayError(e);
-    }
-  };
-
-  const handleUploadInput = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = event?.target?.files as FileList;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const parsed = JSON.parse(e?.target?.result as string);
-        if (parsed?.contentType !== DocumentFileTypes.Decision) {
-          throw new Error('Invalid content type');
-        }
-
-        const nodes: DecisionNode[] = parsed.nodes || [];
-        const nodeIds = nodes.map((node) => node.id);
-        const edges: DecisionEdge[] = ((parsed.edges || []) as DecisionEdge[]).filter(
-          (edge) => nodeIds.includes(edge?.targetId) && nodeIds.includes(edge?.sourceId),
-        );
-
-        checkCyclic({ edges, nodes });
-        setGraph({ edges, nodes });
-        setFileName(fileList?.[0]?.name);
-      } catch (e) {
-        displayError(e);
-      }
-    };
-
-    reader.readAsText(Array.from(fileList)?.[0], 'UTF-8');
-  };
-
-  const handleFileSelect = async (path: string) => {
-    try {
-      // Fetch file contents from the API endpoint
-      const response = await axios.get(`/api/fs/read?path=${encodeURIComponent(path)}`);
-      const fileContents = response.data;
-      
-      // Optionally update the file name
-      setFileName(path.split('/').pop() || 'Untitled Decision');
-      
-      // Parse the content and update the graph if it has the correct content type
-      const parsed = JSON.parse(fileContents);
-      if (parsed?.contentType !== DocumentFileTypes.Decision) {
-        throw new Error('Invalid file content type');
-      }
-      setGraph({
-        nodes: parsed.nodes || [],
-        edges: parsed.edges || [],
-      });
-    } catch (e) {
-      displayError(e);
-    }
-  };
-
-  return (
-    <>
-      <input
-        hidden
-        accept="application/json"
-        type="file"
-        ref={fileInput}
-        onChange={handleUploadInput}
-        onClick={(event) => {
-          if ('value' in event.target) {
-            event.target.value = null;
-          }
-        }}
-      />
-      <Layout style={{ minHeight: '100vh' }}>
-      <DirectorySidebar onSelect={handleFileSelect} />
-      <div className={classes.page} style={{ width: '100%' }}>
-        <PageHeader
-          style={{
-            padding: '8px',
-            background: token.colorBgLayout,
-            boxSizing: 'border-box',
-            borderBottom: `1px solid ${token.colorBorder}`,
-          }}
-          title={
-            <div className={classes.heading}>
-              <Divider type="vertical" style={{ margin: 0 }} />
-              <div className={classes.headingContent}>
-                <Typography.Title
-                  level={4}
-                  style={{ margin: 0, fontWeight: 400 }}
-                  className={classes.headingTitle}
-                  editable={{
-                    text: fileName,
-                    maxLength: 24,
-                    autoSize: { maxRows: 1 },
-                    onChange: (value) => setFileName(value.trim()),
-                    triggerType: ['text'],
-                  }}
-                >
-                  {fileName}
-                </Typography.Title>
-                <Stack horizontal verticalAlign="center" gap={8}>
-                  <Button onClick={handleNew} type={'text'} size={'small'}>
-                    New
-                  </Button>
-                  <Dropdown
-                    menu={{
-                      onClick: handleOpenMenu,
-                      items: [
-                        {
-                          label: 'File system',
-                          key: 'file-system',
-                        },
-                        {
-                          type: 'divider',
-                        },
-                        {
-                          label: 'Fintech: Company analysis',
-                          key: 'company-analysis',
-                        },
-                        {
-                          label: 'Fintech: AML',
-                          key: 'aml',
-                        },
-                        {
-                          label: 'Retail: Shipping fees',
-                          key: 'shipping-fees',
-                        },
-                      ],
-                    }}
-                  >
-                    <Button type={'text'} size={'small'}>
-                      Open
-                    </Button>
-                  </Dropdown>
-                  {supportFSApi && (
-                    <Button onClick={saveFile} type={'text'} size={'small'}>
-                      Save
-                    </Button>
-                  )}
-                  <Button onClick={saveFileAs} type={'text'} size={'small'}>
-                    Save as
-                  </Button>
-                </Stack>
-              </div>
-            </div>
-          }
-          ghost={false}
-          extra={[
-            <Dropdown
-              overlayStyle={{ minWidth: 150 }}
-              menu={{
-                onClick: ({ key }) => setThemePreference(key as ThemePreference),
-                items: [
-                  {
-                    label: 'Automatic',
-                    key: ThemePreference.Automatic,
-                    icon: (
-                      <CheckOutlined
-                        style={{ visibility: themePreference === ThemePreference.Automatic ? 'visible' : 'hidden' }}
-                      />
-                    ),
-                  },
-                  {
-                    label: 'Dark',
-                    key: ThemePreference.Dark,
-                    icon: (
-                      <CheckOutlined
-                        style={{ visibility: themePreference === ThemePreference.Dark ? 'visible' : 'hidden' }}
-                      />
-                    ),
-                  },
-                  {
-                    label: 'Light',
-                    key: ThemePreference.Light,
-                    icon: (
-                      <CheckOutlined
-                        style={{ visibility: themePreference === ThemePreference.Light ? 'visible' : 'hidden' }}
-                      />
-                    ),
-                  },
-                ],
-              }}
-            >
-              <Button type="text" icon={<BulbOutlined />} />
-            </Dropdown>,
-          ]}
+  const headerTitle = (t: TabData) => (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      {t.dirty ? `${t.title} *` : t.title}
+      <Tooltip title="Save">
+        <Button
+          type="text"
+          icon={<SaveOutlined style={{ fontSize: 18 }} />}
+          onClick={saveToServer}
         />
-        <div className={classes.contentWrapper}>
-          <div className={classes.content}>
-            <DecisionGraph
-              ref={graphRef}
-              value={graph}
-              onChange={(value) => setGraph(value)}
-              reactFlowProOptions={{ hideAttribution: true }}
-              simulate={graphTrace}
-              panels={[
-                {
-                  id: 'simulator',
-                  title: 'Simulator',
-                  icon: <PlayCircleOutlined />,
-                  renderPanel: () => (
-                    <GraphSimulator
-                      onClear={() => setGraphTrace(undefined)}
-                      onRun={async ({ graph, context }) => {
-                        try {
-                          const { data } = await axios.post('/api/simulate', {
-                            context,
-                            content: graph,
-                          });
+      </Tooltip>
+    </span>
+  );
 
-                          setGraphTrace({ result: data });
-                        } catch (e) {
-                          const errorMessage = match(e)
-                            .with(
-                              {
-                                response: {
-                                  data: {
-                                    type: P.string,
-                                    source: P.string,
-                                  },
-                                },
-                              },
-                              ({ response: { data: d } }) => `${d.type}: ${d.source}`,
-                            )
-                            .with({ response: { data: { source: P.string } } }, (d) => d.response.data.source)
-                            .with({ response: { data: { message: P.string } } }, (d) => d.response.data.message)
-                            .with({ message: P.string }, (d) => d.message)
-                            .otherwise(() => 'Unknown error occurred');
+  /* -------------------------------------------------------------- */
+  return (
+    <Layout style={{ minHeight: '100vh' }}>
+      <DirectorySidebar onSelect={handleFileSelect} />
 
-                          message.error(errorMessage);
-                          if (axios.isAxiosError(e)) {
-                            console.log(e);
-                            setGraphTrace({
-                              result: {
-                                result: null,
-                                trace: e.response?.data?.trace,
-                                performance: '',
-                              },
-                              error: {
-                                message: e.response?.data?.source,
-                                data: e.response?.data,
-                              },
-                            });
-                          }
-                        }
-                      }}
+      <div className={classes.tabsContainer}>
+        {tabs.length ? (
+          <Tabs
+            type="editable-card"
+            activeKey={activeKey}
+            onChange={setActive}
+            hideAdd
+            onEdit={(k, action) => {
+              if (action !== 'remove') return;
+              const tab = tabs.find(t => t.key === k); if (!tab) return;
+              if (tab.dirty) {
+                Modal.confirm({
+                  title: `Close “${tab.title}” without saving?`,
+                  content: 'Your latest changes will be lost.',
+                  okType: 'danger',
+                  okText: 'Close anyway',
+                  cancelText: 'Cancel',
+                  onOk: () => closeTab(k as string),
+                });
+              } else closeTab(k as string);
+            }}
+            items={tabs.map(t => ({
+              key: t.key,
+              label: tabLabel(t),
+              children: (
+                <div className={classes.tabContent}>
+                  <PageHeader
+                    style={{
+                      padding: 8,
+                      background: token.colorBgLayout,
+                      borderBottom: `1px solid ${token.colorBorder}`,
+                    }}
+                    title={headerTitle(t)}
+                    ghost={false}
+                    extra={
+                      <Dropdown
+                        menu={{
+                          onClick: ({ key }) => setThemePreference(key as ThemePreference),
+                          items: [
+                            { label:'Automatic', key:ThemePreference.Automatic,
+                              icon:<CheckOutlined style={{visibility:themePreference===ThemePreference.Automatic?'visible':'hidden'}}/> },
+                            { label:'Dark', key:ThemePreference.Dark,
+                              icon:<CheckOutlined style={{visibility:themePreference===ThemePreference.Dark?'visible':'hidden'}}/> },
+                            { label:'Light', key:ThemePreference.Light,
+                              icon:<CheckOutlined style={{visibility:themePreference===ThemePreference.Light?'visible':'hidden'}}/> },
+                          ],
+                        }}
+                      >
+                        <Button type="text" icon={<BulbOutlined />} />
+                      </Dropdown>
+                    }
+                  />
+
+                  <div className={classes.graphArea} style={{ width: '100%', height: '100%' }}>
+                    <DecisionGraph
+                      ref={graphRef}
+                      value={t.graph}
+                      onChange={(g: DecisionGraphType) => updateActive({ graph: g, dirty: true })}
+                      reactFlowProOptions={{ hideAttribution: true }}
+                      simulate={t.trace}
+                      panels={[
+                        {
+                          id: 'sim',
+                          title: 'Simulator',
+                          icon: <PlayCircleOutlined />,
+                          renderPanel: () => (
+                            <GraphSimulator
+                              onClear={() => updateActive({ trace: undefined })}
+                              onRun={async ({ graph, context }) => {
+                                try {
+                                  const { data } = await axios.post('/api/simulate', { content: graph, context });
+                                  updateActive({ trace: { result: data } });
+                                } catch (e) { displayError(e); }
+                              }}
+                              // @ts-ignore  (adjust to the actual callback name your library provides)
+                              onContextChange={() => updateActive({ dirty: true })}
+                            />
+                          ),
+                        },
+                      ]}
                     />
-                  ),
-                },
-              ]}
-            />
+                  </div>
+                </div>
+              ),
+            }))}
+          />
+        ) : (
+          <div className={classes.placeholder}>
+            <span>Select a file from the sidebar to begin</span>
           </div>
-        </div>
+        )}
       </div>
-      </Layout>
-    </>
+    </Layout>
   );
 };
