@@ -1,15 +1,57 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "type": "chrome",
-            "request": "launch",
-            "name": "Launch Chrome against localhost",
-            "url": "http://localhost:3000",
-            "webRoot": "${workspaceFolder}"
-        }
-    ]
+  "version": "0.2.0",
+
+  "configurations": [
+    /* ────────────────────────────────────────────────
+       1 ▸ Run Vite under the Node debugger
+       ─────────────────────────────────────────────── */
+    {
+      "name": "Vite dev server",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["run", "dev"],          // = vite --host
+      "cwd": "${workspaceFolder}",
+
+      /* full source-map support */
+      "env": { "NODE_OPTIONS": "--enable-source-maps" },
+      "autoAttachChildProcesses": true,       // catches esbuild workers
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/**",
+        "!**/node_modules/**"
+      ]
+    },
+
+    /* ────────────────────────────────────────────────
+       2 ▸ Open a browser and attach to it
+       ─────────────────────────────────────────────── */
+    {
+      "name": "Chrome",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:5173",         // Vite’s default port
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true,
+      "sourceMapPathOverrides": {
+        "/@fs/*": "/*",                      // Vite absolute-file paths
+        "/src/*": "${webRoot}/src/*"
+      },
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"],
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/**",
+        "!**/node_modules/**"
+      ]
+    }
+  ],
+
+  /* ────────────────────────────────────────────────
+     Run both with one click (or just press F5)
+     ─────────────────────────────────────────────── */
+  "compounds": [
+    {
+      "name": "Vite + Chrome",
+      "configurations": ["Vite dev server", "Chrome"]
+    }
+  ]
 }

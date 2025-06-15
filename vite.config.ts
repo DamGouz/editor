@@ -14,11 +14,18 @@ export default defineConfig({
     dedupe: ['react', 'react-dom'],
   },
   server: {
-    https: {
-      cert: path.join(__dirname, 'cert', 'localhost.pem'),
-      key: path.join(__dirname, 'cert', 'localhost-key.pem'),
-    },
+    host: true,
+    port: 5173,
+    // https: {
+    //   cert: path.join(__dirname, 'cert', 'localhost.pem'),
+    //   key: path.join(__dirname, 'cert', 'localhost-key.pem'),
+    // },
+    
     proxy: {
+      '/api/fs': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,

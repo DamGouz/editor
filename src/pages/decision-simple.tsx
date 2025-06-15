@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, Divider, Dropdown, message, Modal, theme, Typography } from 'antd';
+import { Layout, Button, Divider, Dropdown, message, Modal, theme, Typography } from 'antd';
 import { BulbOutlined, CheckOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { decisionTemplates } from '../assets/decision-templates';
 import { displayError } from '../helpers/error-message.ts';
@@ -11,6 +11,8 @@ import { DirectedGraph } from 'graphology';
 import { hasCycle } from 'graphology-dag';
 import { Stack } from '../components/stack.tsx';
 import { match, P } from 'ts-pattern';
+
+import { DirectorySidebar } from './sidebar.tsx';
 
 import classes from './decision-simple.module.css';
 import axios from 'axios';
@@ -105,25 +107,16 @@ export const DecisionSimplePage: React.FC = () => {
   };
 
   const saveFile = async () => {
-    if (!supportFSApi) {
-      message.error('Unsupported file system API');
-      return;
-    }
-
-    if (fileHandle) {
-      let writable: FileSystemWritableFileStream | undefined = undefined;
-      try {
-        writable = await fileHandle.createWritable();
-        checkCyclic();
-
-        const json = JSON.stringify({ contentType: DocumentFileTypes.Decision, ...graph }, null, 2);
-        await writable.write(json);
-        message.success('File saved');
-      } catch (e) {
-        displayError(e);
-      } finally {
-        writable?.close?.();
-      }
+    try {
+      checkCyclic();
+      const json = JSON.stringify({ contentType: DocumentFileTypes.Decision, ...graph }, null, 2);
+      await axios.post('/api/fs/write', {
+        path: fileName,
+        content: json,
+      });
+      message.success('File saved');
+    } catch (e) {
+      displayError(e);
     }
   };
 
@@ -226,6 +219,29 @@ export const DecisionSimplePage: React.FC = () => {
     reader.readAsText(Array.from(fileList)?.[0], 'UTF-8');
   };
 
+  const handleFileSelect = async (path: string) => {
+    try {
+      // Fetch file contents from the API endpoint
+      const response = await axios.get(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      const fileContents = response.data;
+      
+      // Optionally update the file name
+      setFileName(path.split('/').pop() || 'Untitled Decision');
+      
+      // Parse the content and update the graph if it has the correct content type
+      const parsed = JSON.parse(fileContents);
+      if (parsed?.contentType !== DocumentFileTypes.Decision) {
+        throw new Error('Invalid file content type');
+      }
+      setGraph({
+        nodes: parsed.nodes || [],
+        edges: parsed.edges || [],
+      });
+    } catch (e) {
+      displayError(e);
+    }
+  };
+
   return (
     <>
       <input
@@ -240,7 +256,9 @@ export const DecisionSimplePage: React.FC = () => {
           }
         }}
       />
-      <div className={classes.page}>
+      <Layout style={{ minHeight: '100vh' }}>
+      <DirectorySidebar onSelect={handleFileSelect} />
+      <div className={classes.page} style={{ width: '100%' }}>
         <PageHeader
           style={{
             padding: '8px',
@@ -250,12 +268,6 @@ export const DecisionSimplePage: React.FC = () => {
           }}
           title={
             <div className={classes.heading}>
-              <Button
-                type="text"
-                target="_blank"
-                href="https://gorules.io"
-                icon={<img height={24} width={24} src={'/favicon.svg'} />}
-              />
               <Divider type="vertical" style={{ margin: 0 }} />
               <div className={classes.headingContent}>
                 <Typography.Title
@@ -426,6 +438,7 @@ export const DecisionSimplePage: React.FC = () => {
           </div>
         </div>
       </div>
+      </Layout>
     </>
   );
 };
