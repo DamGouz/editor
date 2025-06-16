@@ -24,6 +24,7 @@ use serde_json::Value;
 use std::{
     env,
     fs,
+    io::Read,
     io::Cursor,
     path::{Component, Path as StdPath, PathBuf},
     sync::{Arc, Mutex},
@@ -65,6 +66,12 @@ fn safe_path(user: &str) -> Result<PathBuf, StatusCode> {
         }
     }
     Ok(p)
+}
+
+#[derive(Serialize)]
+struct SearchHit {
+    path: String,
+    matched: &'static str, // "name", "content"
 }
 
 fn read_head() -> u64 {
@@ -169,6 +176,66 @@ struct AppState {
 }
 
 // ===== /api/fs/* ============================================================
+
+async fn fs_search(Query(p): Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let needle = match p.get("q") {
+        Some(q) if !q.is_empty() => q.to_lowercase(),
+        _ => return (StatusCode::BAD_REQUEST, "missing ?q=").into_response(),
+    };
+    let sub = p.get("path").cloned().unwrap_or_default();
+
+    let root = match safe_path(&sub) {
+        Ok(p) if p.exists() => p,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    // Do the heavy IO in a blocking thread and return the Vec<SearchHit>
+    let hits: Vec<SearchHit> = match tokio::task::spawn_blocking(move || {
+        let mut out = Vec::<SearchHit>::new();
+
+        for entry in WalkDir::new(&root).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(STORAGE_ROOT)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            // --- name match --------------------------------------------------
+            if rel.to_lowercase().contains(&needle) {
+                out.push(SearchHit { path: rel, matched: "name" });
+                continue;
+            }
+
+            // --- content match ----------------------------------------------
+            if let Ok(mut f) = std::fs::File::open(entry.path()) {
+                let mut buf = String::new();
+                if f.metadata().map(|m| m.len()).unwrap_or(0) <= 1_000_000 {
+                    if f.read_to_string(&mut buf).is_ok()
+                        && buf.to_lowercase().contains(&needle)
+                    {
+                        out.push(SearchHit { path: rel, matched: "content" });
+                    }
+                }
+            }
+        }
+
+        out // returned from the closure
+    })
+    .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("search task panicked: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    Json(hits).into_response()
+}
 
 async fn fs_list(Query(p): Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
     let sub = p.get("path").cloned().unwrap_or_default();
@@ -441,6 +508,7 @@ async fn main() {
         .route("/api/health", get(health))
         .route("/api/simulate", post(simulate).layer(DefaultBodyLimit::max(16 * 1024 * 1024)))
         // file service
+        .route("/api/fs/search",    get(fs_search))
         .route("/api/fs/list",      get(fs_list))
         .route("/api/fs/read",      get(fs_read))
         .route("/api/fs/save",      post(fs_save))
